@@ -62,8 +62,9 @@ Nếu cửa sổ thấp, kéo thanh cuộn bên trái để xem các phần đi�
 - Chưa có vật chuẩn: số đo là **pixel ảnh gốc**, kể cả khi ảnh xử lý đã thu nhỏ.
 - Có vật chuẩn: `pixel_per_unit = cạnh chuẩn theo pixel / kích thước thực`;
   `kích thước vật = cạnh theo pixel / pixel_per_unit`.
-- **Diện tích bao (px² gốc):** diện tích bên trong đường bao ngoài (contour),
-  không phải diện tích hình chữ nhật xoay; các lỗ bên trong không bị trừ.
+- **Diện tích:** chọn một trong ba cách ở mục Tính diện tích. Bảng hiện px² khi chưa
+  hiệu chuẩn, hoặc đơn vị² khi đã chọn vật chuẩn. Đây không phải diện tích hộp bao xoay.
+  Mặt nạ đo cho thấy đúng vùng được tính.
 - Nhãn trên ảnh làm tròn 1 chữ số; bảng 2 chữ số; CSV giữ đến 4 chữ số.
   Số chữ số hiển thị không phải cam kết độ chính xác đo.
 
@@ -97,12 +98,21 @@ gốc. Thu nhỏ làm mất chi tiết nhỏ: tăng cạnh xử lý nếu cần.
 | Gaussian | Kernel lẻ; tăng để giảm nhiễu nhưng có thể mất vật nhỏ; 1 là không làm mờ |
 | Canny thấp/cao | Chỉ tác động ở chế độ Canny; cần thấp < cao |
 | Kernel đóng | Nối khe hở nhỏ; tăng quá mức có thể nối hai vật với nhau |
+| Tính diện tích | Đường bao: Shoelace; Lấp lỗ: vật đặc như lá; Đếm pixel: vùng đã tách như khe nứt, không lấp lỗ |
 | Diện tích min | Lọc diện tích contour tính theo pixel² của ảnh xử lý, trước quy đổi |
 | Cạnh xử lý tối đa | Tối đa 2400 px; ảnh lớn hơn chạy chậm hơn |
 | Bỏ vật sát mép | Loại biên nền và vật bị cắt cụt gần mép ảnh |
 
 Không tìm thấy vật: thử đổi phương pháp, giảm diện tích min hoặc giảm ngưỡng
 Canny. Nếu vật bị nối: giảm kernel đóng, giảm blur hoặc chụp tách vật xa nhau.
+Với lá, chọn **Lấp lỗ** (ứng dụng gợi ý kernel đóng 5 khi đang ở 3),
+tăng kernel đóng từng bước nếu mép lá còn hở,
+rồi xem **Mặt nạ đo**. Vùng xanh/gân hoặc chữ bị lấp nhầm phải được loại bỏ
+trước khi dùng số đo. Với linh kiện có lỗ thật, dùng **Đường bao** để đo
+diện tích bao ngoài, hoặc **Đếm pixel** trên mặt nạ đã tách để trừ lỗ.
+Với khe nứt, tách nứt thành vùng trắng bằng Otsu dark hoặc GrabCut rồi dùng
+**Đếm pixel**; không dùng lấp lỗ. Mỗi pixel của ảnh xử lý được quy đổi
+theo tỷ lệ hai chiều để trả diện tích về px² của ảnh gốc.
 
 ## 6. Nội dung xuất
 

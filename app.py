@@ -109,6 +109,7 @@ class App(tk.Tk):
         self.low = tk.StringVar(value='50')
         self.high = tk.StringVar(value='100')
         self.close_kernel = tk.StringVar(value='3')
+        self.area_mode = tk.StringVar(value='Đường bao')
         self.min_area = tk.StringVar(value='100')
         self.max_side = tk.StringVar(value='1400')
         self.exclude_border = tk.BooleanVar(value=True)
@@ -127,7 +128,8 @@ class App(tk.Tk):
         style.configure('Accent.TButton', background='#155ed6', foreground='white')
         style.configure('Treeview', rowheight=28, font=('Segoe UI', 10))
         self.build()
-        for var in (self.method, self.blur, self.low, self.high, self.close_kernel, self.min_area, self.max_side, self.exclude_border):
+        self.area_mode.trace_add('write', self.area_mode_changed)
+        for var in (self.method, self.blur, self.low, self.high, self.close_kernel, self.area_mode, self.min_area, self.max_side, self.exclude_border):
             var.trace_add('write', self.mark_dirty)
         self.after(100, self.poll)
         self.bind('<Control-o>', lambda e: self.open_image())
@@ -172,6 +174,7 @@ class App(tk.Tk):
                   ('Gaussian', self.blur, [1, 3, 5, 7, 9, 11, 15]),
                   ('Canny thấp', self.low, None), ('Canny cao', self.high, None),
                   ('Kernel đóng', self.close_kernel, [1, 3, 5, 7, 9]),
+                  ('Tính diện tích', self.area_mode, ['Đường bao', 'Lấp lỗ', 'Đếm pixel']),
                   ('Diện tích min (px² xử lý)', self.min_area, None),
                   ('Cạnh xử lý tối đa (px)', self.max_side, [800, 1000, 1400, 2000, 2400])]
         for i, (label, var, values) in enumerate(fields):
@@ -180,7 +183,7 @@ class App(tk.Tk):
             widget.grid(row=i, column=1, sticky='e', padx=(5, 0))
             self.parameter_widgets.append((widget, 'readonly' if values else 'normal'))
         check = ttk.Checkbutton(settings, text='Bỏ vật sát mép ảnh', variable=self.exclude_border)
-        check.grid(row=7, columnspan=2, sticky='w', pady=6)
+        check.grid(row=8, columnspan=2, sticky='w', pady=6)
         self.parameter_widgets.append((check, 'normal'))
         self.edit_frame = ttk.LabelFrame(side, text='Chọn và sửa vùng vật', padding=10)
         ttk.Combobox(self.edit_frame, textvariable=self.tool, state='readonly',
@@ -191,7 +194,7 @@ class App(tk.Tk):
         ttk.Button(self.edit_frame, text='Hoàn tác nét/đỉnh', command=self.undo_selection).pack(fill='x')
         ttk.Button(self.edit_frame, text='Xóa vùng chọn', command=self.reset_selection).pack(fill='x')
         self.run_btn = ttk.Button(settings, text='Áp dụng / Xử lý lại (F5)', command=self.run)
-        self.run_btn.grid(row=8, columnspan=2, sticky='ew')
+        self.run_btn.grid(row=9, columnspan=2, sticky='ew')
         cal = ttk.LabelFrame(side, text='2. Hiệu chuẩn kích thước', padding=10)
         cal.pack(fill='x', pady=(12, 0))
         ttk.Label(cal, text='Chọn vật chuẩn theo ID trên ảnh:').pack(anchor='w')
@@ -214,7 +217,7 @@ class App(tk.Tk):
         top.pack(fill='x', pady=(0, 8))
         ttk.Label(top, textvariable=self.summary, font=('Segoe UI', 10, 'bold')).pack(side='left')
         selector = ttk.Combobox(top, textvariable=self.stage, state='readonly', width=22,
-                              values=['Kết quả', 'Ảnh gốc', 'Ảnh xám', 'Lọc Gaussian', 'Biên / Nhị phân', 'Đóng hình thái', 'Vùng vật'])
+                              values=['Kết quả', 'Ảnh gốc', 'Ảnh xám', 'Lọc Gaussian', 'Biên / Nhị phân', 'Đóng hình thái', 'Mặt nạ đo', 'Vùng vật'])
         selector.pack(side='right')
         selector.bind('<<ComboboxSelected>>', lambda e: self.refresh_image())
         ttk.Button(top, text='Vừa khung', command=lambda: self.panel.reset_view()).pack(side='right', padx=3)
@@ -235,7 +238,7 @@ class App(tk.Tk):
         table_frame = ttk.Frame(main)
         table_frame.pack(fill='x')
         self.table = ttk.Treeview(table_frame, columns=('id', 'role', 'long', 'short', 'unit', 'area'), show='headings', height=5, selectmode='browse')
-        for key, label, width in [('id', 'ID', 45), ('role', 'Vai trò', 95), ('long', 'Cạnh dài', 105), ('short', 'Cạnh ngắn', 105), ('unit', 'Đơn vị', 65), ('area', 'Diện tích đường bao', 175)]:
+        for key, label, width in [('id', 'ID', 45), ('role', 'Vai trò', 95), ('long', 'Cạnh dài', 105), ('short', 'Cạnh ngắn', 105), ('unit', 'Đơn vị', 65), ('area', 'Diện tích', 175)]:
             self.table.heading(key, text=label)
             self.table.column(key, width=width, anchor='center')
         self.table.pack(side='left', fill='x', expand=True)
@@ -259,6 +262,10 @@ class App(tk.Tk):
             self.dirty = True
             self.status.set('Tham số đã thay đổi. Bấm Áp dụng / F5; ảnh và bảng hiện tại vẫn là kết quả lần xử lý trước.')
 
+    def area_mode_changed(self, *_):
+        if self.area_mode.get() == 'Lấp lỗ' and self.close_kernel.get() == '3':
+            self.close_kernel.set('5')  # Nối các khe nhỏ ở mép lá trước khi lấp lỗ.
+
     def open_image(self):
         if self.busy:
             return
@@ -279,7 +286,9 @@ class App(tk.Tk):
             settings = Settings(method=self.method.get(), blur=int(self.blur.get()),
                                 low=int(self.low.get()), high=int(self.high.get()),
                                 close=int(self.close_kernel.get()), min_area=float(self.min_area.get()),
-                                max_side=int(self.max_side.get()), exclude_border=self.exclude_border.get())
+                                max_side=int(self.max_side.get()), exclude_border=self.exclude_border.get(),
+                                area_mode={'Đường bao': 'contour', 'Lấp lỗ': 'filled',
+                                           'Đếm pixel': 'pixels'}[self.area_mode.get()])
         except ValueError:
             raise ValueError('Các tham số ngưỡng, kernel, diện tích và kích thước phải là số hợp lệ.')
         settings.validate()
@@ -318,7 +327,8 @@ class App(tk.Tk):
             return
         keep_old = (settings.method == 'GrabCut' and self.result is not None
                     and Path(self.result.source) == Path(path).resolve()
-                    and bool(self.result.objects) and self.keep_existing.get())
+                    and bool(self.result.objects) and self.keep_existing.get()
+                    and settings.area_mode == self.result.settings.area_mode)
         if keep_old and not selection:
             messagebox.showinfo('Vùng chọn', 'Hãy khoanh vùng vật cần thêm hoặc sửa trước khi bấm F5.')
             return
@@ -378,7 +388,7 @@ class App(tk.Tk):
         self.table.delete(*self.table.get_children())
         for row in self.rows:
             self.table.insert('', 'end', iid=str(row['id']), values=(row['id'], 'Vật chuẩn' if row['is_reference'] else 'Vật đo',
-                              f"{row['long']:.2f}", f"{row['short']:.2f}", row['unit'], f"{row['area_px2']:.1f}"))
+                              f"{row['long']:.2f}", f"{row['short']:.2f}", row['unit'], f"{row['area']:.1f} {row['area_unit']}"))
         self.refresh_image()
 
     def refresh_image(self):
@@ -505,11 +515,15 @@ class App(tk.Tk):
         self.result.objects = [o for o in self.result.objects if o['id'] != region_id]
         rgb = self.result.stages['Ảnh gốc']
         mask = np.zeros(rgb.shape[:2], np.uint8)
+        old_mask = self.result.stages['Mặt nạ đo']
         for obj in self.result.objects:
-            cv2.drawContours(mask, [np.asarray(obj['contour'], np.int32)], -1, 255, -1)
+            region = np.zeros(mask.shape, np.uint8)
+            cv2.drawContours(region, [np.asarray(obj['contour'], np.int32)], -1, 255, -1)
+            mask[(old_mask > 0) & (region > 0)] = 255
         overlay = rgb.copy()
         overlay[mask > 0] = (.55*rgb[mask > 0] + .45*np.array([30, 210, 130])).astype(np.uint8)
         self.result.stages['Vùng vật'] = overlay
+        self.result.stages['Mặt nạ đo'] = mask
         if self.calibration and self.calibration.get('reference_id') == region_id:
             self.calibration = None
         self.confirmed.set(False)

@@ -13,7 +13,7 @@ from PIL import Image, ImageOps
 from contours import sort_contours, contour_area
 from io_utils import bgr_to_gray
 from spatial_filters import gaussian_blur
-from morphology import closing
+from morphology import closing, fill_holes
 from segmentation import grabcut_mask
 from thresholding import otsu_thresholding
 
@@ -31,6 +31,7 @@ class Settings:
     min_area: float = 100.0  # working-image pixels squared
     max_side: int = 1400
     exclude_border: bool = True
+    area_mode: str = 'contour'  # contour, filled, pixels
 
     def validate(self):
         if self.method not in ('Canny', 'Otsu light', 'Otsu dark', 'GrabCut'):
@@ -43,6 +44,8 @@ class Settings:
             raise ValueError('Diện tích tối thiểu phải hữu hạn và không âm')
         if not 200 <= self.max_side <= 2400:
             raise ValueError('Cạnh xử lý phải trong khoảng 200–2400 px')
+        if self.area_mode not in ('contour', 'filled', 'pixels'):
+            raise ValueError('Cách tính diện tích không hợp lệ')
 
 
 @dataclass
@@ -90,15 +93,21 @@ def process(path, settings=None, selection=None):
         binary, _ = otsu_thresholding(blur)
         if settings.method == 'Otsu dark':
             binary = 255 - binary
-    mask = binary if settings.method == 'GrabCut' else closing(binary, np.ones((settings.close, settings.close), dtype=np.uint8))
+    closed = binary if settings.method == 'GrabCut' else closing(binary, np.ones((settings.close, settings.close), dtype=np.uint8))
+    mask = fill_holes(closed) if settings.area_mode == 'filled' else closed
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contours, _ = sort_contours(contours)
     objects = []
     for c in contours:
-        area = contour_area(c)
+        x, y, cw, ch = cv2.boundingRect(c)
+        if settings.area_mode == 'contour':
+            area = contour_area(c)
+        else:
+            region = np.zeros((ch, cw), np.uint8)
+            cv2.drawContours(region, [c - (x, y)], -1, 255, -1)
+            area = np.count_nonzero((mask[y:y+ch, x:x+cw] > 0) & (region > 0))
         if area < settings.min_area:
             continue
-        x, y, cw, ch = cv2.boundingRect(c)
         # Morphology erodes edge pixels: also reject contours within kernel radius.
         margin = settings.close // 2 + 1
         if settings.exclude_border and (x <= margin or y <= margin or x+cw >= size[0]-margin or y+ch >= size[1]-margin):
@@ -113,11 +122,11 @@ def process(path, settings=None, selection=None):
         native_box = cv2.boxPoints(rect)
         display_box = native_box / np.array([sx, sy])
         objects.append(dict(id=len(objects)+1, long_px=float(long_px), short_px=float(short_px),
-                            area_px2=float(contour_area(native)),
+                            area_px2=float(contour_area(native) if settings.area_mode == 'contour' else area * sx * sy),
                             perimeter_px=float(cv2.arcLength(native, True)),
                             contour=c.reshape(-1, 2).tolist(), box=display_box.tolist()))
     stages = {'Ảnh gốc': rgb, 'Ảnh xám': gray, 'Lọc Gaussian': blur,
-              'Biên / Nhị phân': binary, 'Đóng hình thái': mask}
+              'Biên / Nhị phân': binary, 'Đóng hình thái': closed, 'Mặt nạ đo': mask}
     overlay = rgb.copy()
     overlay[mask > 0] = (.55 * rgb[mask > 0] + .45 * np.array([30, 210, 130])).astype(np.uint8)
     stages['Vùng vật'] = overlay
@@ -153,14 +162,19 @@ def apply_grabcut(prev_result, settings, selection, keep_existing=True):
             next_id += 1
         result.objects = kept + result.objects
 
-    # Hiển thị cả đường bao cũ lẫn vùng GrabCut mới.
+    # Hiển thị cả vùng cũ lẫn vùng GrabCut mới, kể cả khi vật có lỗ thật.
     rgb = result.stages['Ảnh gốc']
-    mask = np.zeros(rgb.shape[:2], np.uint8)
-    for obj in result.objects:
-        cv2.drawContours(mask, [np.asarray(obj['contour'], np.int32)], -1, 255, -1)
+    mask = result.stages['Mặt nạ đo'].copy()
+    if keep_existing:
+        old_mask = prev_result.stages['Mặt nạ đo']
+        for obj in kept:
+            region = np.zeros(mask.shape, np.uint8)
+            cv2.drawContours(region, [np.asarray(obj['contour'], np.int32)], -1, 255, -1)
+            mask[(old_mask > 0) & (region > 0)] = 255
     overlay = rgb.copy()
     overlay[mask > 0] = (.55 * rgb[mask > 0] + .45 * np.array([30, 210, 130])).astype(np.uint8)
     result.stages['Vùng vật'] = overlay
+    result.stages['Mặt nạ đo'] = mask
     return result
 
 

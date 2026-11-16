@@ -1,4 +1,5 @@
 """Binary morphology implemented using NumPy and active kernel offsets."""
+from collections import deque
 import numpy as np
 
 
@@ -38,3 +39,30 @@ def closing(image, kernel):
 
 def extract_boundary(image, kernel):
     return ((image > 0) & (erosion(image, kernel) == 0)).astype(np.uint8) * 255
+
+
+def fill_holes(image):
+    """Fill black regions enclosed by white pixels; 4-neighbor background flood fill."""
+    h, w = image.shape
+    background = image == 0
+    outside = np.zeros((h, w), bool)
+    queue = deque()
+    for y in range(h):
+        for x in (0, w - 1):
+            if background[y, x] and not outside[y, x]:
+                outside[y, x] = True
+                queue.append((x, y))
+    for x in range(w):
+        for y in (0, h - 1):
+            if background[y, x] and not outside[y, x]:
+                outside[y, x] = True
+                queue.append((x, y))
+    while queue:
+        x, y = queue.popleft()
+        for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+            if 0 <= nx < w and 0 <= ny < h and background[ny, nx] and not outside[ny, nx]:
+                outside[ny, nx] = True
+                queue.append((nx, ny))
+    result = image.copy()
+    result[background & ~outside] = 255
+    return result

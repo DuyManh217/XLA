@@ -116,7 +116,8 @@ class App(tk.Tk):
         toolbar.pack(fill='x')
         self.open_btn = ttk.Button(toolbar, text='＋ Chọn ảnh', style='Accent.TButton', command=self.open_image)
         self.open_btn.pack(side='left')
-        self.sample_box = ttk.Combobox(toolbar, state='readonly', width=18, values=[p.name for p in sorted((ROOT/'images').glob('*.png'))])
+        samples = [p.name for p in sorted((ROOT/'images').iterdir()) if p.suffix.lower() in ('.png', '.jpg', '.jpeg')]
+        self.sample_box = ttk.Combobox(toolbar, state='readonly', width=18, values=samples)
         self.sample_box.set('Mở ảnh mẫu…')
         self.sample_box.pack(side='left', padx=10)
         self.sample_box.bind('<<ComboboxSelected>>', lambda e: self.open_path(ROOT/'images'/self.sample_box.get()))

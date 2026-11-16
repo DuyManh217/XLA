@@ -73,9 +73,9 @@ def gaussian_blur(img, ksize=7, sigma=0):
     kh, kw = kernel.shape
     pad_h, pad_w = kh // 2, kw // 2
 
-    # Đệm viền 0 (Zero-padding)
+    # Phản chiếu viền để không tạo khung đen giả khi tìm biên.
     padded_img = np.pad(
-        img, ((pad_h, pad_h), (pad_w, pad_w)), mode="constant", constant_values=0
+        img, ((pad_h, pad_h), (pad_w, pad_w)), mode="reflect"
     )
     result = np.zeros_like(img, dtype=np.float32)
     h, w = img.shape

@@ -1,4 +1,35 @@
 import numpy as np
+from collections import deque
+
+
+def trace_boundary(binary_img, start):
+    """Đi quanh biên ngoài theo 8 lân cận (Moore), thay vì thứ tự BFS."""
+    directions = [(1, 0), (1, 1), (0, 1), (-1, 1),
+                  (-1, 0), (-1, -1), (0, -1), (1, -1)]
+    h, w = binary_img.shape
+    current = start
+    back = (start[0] - 1, start[1])
+    boundary = []
+    first_next = None
+    for _ in range(binary_img.size * 8):
+        index = directions.index((back[0] - current[0], back[1] - current[1]))
+        for step in range(1, 9):
+            k = (index + step) % 8
+            dx, dy = directions[k]
+            nxt = (current[0] + dx, current[1] + dy)
+            if 0 <= nxt[0] < w and 0 <= nxt[1] < h and binary_img[nxt[1], nxt[0]] == 255:
+                break
+        else:
+            return np.array([start], dtype=np.int32).reshape(-1, 1, 2)
+        if current == start and nxt == first_next:
+            return np.array(boundary, dtype=np.int32).reshape(-1, 1, 2)
+        if first_next is None:
+            first_next = nxt
+        boundary.append(current)
+        dx, dy = directions[(k - 1) % 8]
+        back = (current[0] + dx, current[1] + dy)
+        current = nxt
+    raise ValueError("Không thể khép kín đường biên.")
 
 
 def find_contours(binary_img):
@@ -19,12 +50,12 @@ def find_contours(binary_img):
             if binary_img[y, x] == 255 and not visited[y, x]:
 
                 # 1. Dùng BFS (Hàng đợi) để loang tìm toàn bộ các pixel của vật thể
-                queue = [(x, y)]
+                queue = deque([(x, y)])
                 visited[y, x] = True
                 component_pixels = []
 
                 while queue:
-                    cx, cy = queue.pop(0)
+                    cx, cy = queue.popleft()
                     component_pixels.append((cx, cy))
 
                     for dx, dy in directions:
@@ -37,37 +68,8 @@ def find_contours(binary_img):
                 # 2. Lọc nhiễu: Chỉ lấy các vật thể có diện tích > 50 pixel
                 if len(component_pixels) > 50:
 
-                    # 3. Tìm đường viền (Boundary) của vật thể này
-                    # Đường viền là những điểm thuộc vật thể nhưng có ít nhất 1 lân cận là nền (0)
-                    boundary = []
-                    for px, py in component_pixels:
-                        is_boundary = False
-                        for dx, dy in [
-                            (-1, 0),
-                            (1, 0),
-                            (0, -1),
-                            (0, 1),
-                        ]:  # Chỉ cần xét 4 hướng
-                            nx, ny = px + dx, py + dy
-                            # Nếu nằm sát biên ảnh hoặc lân cận là nền
-                            if (
-                                nx < 0
-                                or nx >= w
-                                or ny < 0
-                                or ny >= h
-                                or binary_img[ny, nx] == 0
-                            ):
-                                is_boundary = True
-                                break
-                        if is_boundary:
-                            boundary.append((px, py))
-
-                    # 4. Chuyển đổi sang định dạng giống OpenCV (N, 1, 2)
-                    if len(boundary) > 0:
-                        contour_np = np.array(boundary, dtype=np.int32).reshape(
-                            -1, 1, 2
-                        )
-                        contours.append(contour_np)
+                    # 3. Đi quanh biên ngoài để công thức diện tích/chu vi đúng.
+                    contours.append(trace_boundary(binary_img, (x, y)))
 
     return contours
 
@@ -76,6 +78,8 @@ def sort_contours(cnts, method="left-to-right"):
     """
     Sắp xếp danh sách các contours theo thứ tự hình học.
     """
+    if len(cnts) == 0:
+        return [], np.empty((0, 4), dtype=int)
     boundingBoxes = []
 
     for c in cnts:
@@ -120,7 +124,7 @@ def contour_area(c):
     """
     Tính diện tích contour bằng công thức Shoelace (thay cho cv2.contourArea).
     """
-    pts = c.reshape(-1, 2)
+    pts = c.reshape(-1, 2).astype(np.float64)
     n = len(pts)
     if n < 3:
         return 0.0
@@ -131,6 +135,29 @@ def contour_area(c):
         x2, y2 = pts[(i + 1) % n]
         area += (x1 * y2) - (x2 * y1)
     return abs(area) / 2.0
+
+
+def contour_perimeter(c, is_closed=True):
+    """
+    Tính chu vi contour bằng tổng khoảng cách Euclid giữa các điểm liên tiếp (thay cho cv2.arcLength).
+    """
+    pts = c.reshape(-1, 2).astype(np.float64)
+    n = len(pts)
+    if n < 2:
+        return 0.0
+
+    perimeter = 0.0
+    for i in range(n - 1):
+        dx = pts[i + 1][0] - pts[i][0]
+        dy = pts[i + 1][1] - pts[i][1]
+        perimeter += np.sqrt(dx * dx + dy * dy)
+
+    if is_closed and n > 2:
+        dx = pts[0][0] - pts[-1][0]
+        dy = pts[0][1] - pts[-1][1]
+        perimeter += np.sqrt(dx * dx + dy * dy)
+
+    return float(perimeter)
 
 
 def box_points(rect):
@@ -156,13 +183,13 @@ def box_points(rect):
 
     # Xoay và tịnh tiến về tâm thực tế
     rotated_corners = np.dot(corners, rotation_matrix.T) + [cx, cy]
-    return rotated_corners.astype(np.int32)
+    return rotated_corners.astype(np.float32)
 
 
 def min_area_rect(c):
     """
     Tìm hình chữ nhật xoay nhỏ nhất bao quanh contour (thay cho cv2.minAreaRect).
-    Sử dụng phương pháp xoay trục tọa độ (Rotating Calipers đơn giản hóa).
+    Quét góc xoay: kết quả xấp xỉ, không phải rotating calipers chính xác.
     """
     pts = c.reshape(-1, 2).astype(np.float32)
 
@@ -183,7 +210,7 @@ def min_area_rect(c):
 
     # Để tối ưu, ta chỉ cần quét góc dựa trên các cạnh của đa giác lồi
     # Nhưng để code đơn giản, ta quét góc từ 0 đến 90 độ
-    for angle in range(0, 90, 2):
+    for angle in range(0, 90):
         theta = np.deg2rad(angle)
         cos_t = np.cos(theta)
         sin_t = np.sin(theta)

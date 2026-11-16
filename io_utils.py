@@ -44,21 +44,9 @@ def order_points(pts):
     Sắp xếp 4 điểm: Trên-Trái (TL), Trên-Phải (TR), Dưới-Phải (BR), Dưới-Trái (BL).
     :param pts: Mảng 4 điểm (shape: 4x2)
     """
-    # Khởi tạo mảng kết quả
-    rect = np.zeros((4, 2), dtype="float32")
-
-    # 1. Tính tổng (x + y)
-    s = pts.sum(axis=1)
-    # Điểm có tổng nhỏ nhất là Top-Left
-    rect[0] = pts[np.argmin(s)]
-    # Điểm có tổng lớn nhất là Bottom-Right
-    rect[2] = pts[np.argmax(s)]
-
-    # 2. Tính hiệu (x - y)
-    diff = np.diff(pts, axis=1)
-    # Điểm có hiệu nhỏ nhất là Top-Right
-    rect[1] = pts[np.argmin(diff)]
-    # Điểm có hiệu lớn nhất là Bottom-Left
-    rect[3] = pts[np.argmax(diff)]
-
-    return rect
+    # Trường hợp góc 45 độ có thể chọn trùng đỉnh bằng tổng/hiệu.
+    # Xếp vòng quanh tâm luôn giữ đủ bốn đỉnh và đúng các cạnh đối diện.
+    center = np.mean(pts, axis=0)
+    angles = np.arctan2(pts[:, 1] - center[1], pts[:, 0] - center[0])
+    rect = np.asarray(pts, dtype=np.float32)[np.argsort(angles)]
+    return np.roll(rect, -np.argmin(rect.sum(axis=1)), axis=0)

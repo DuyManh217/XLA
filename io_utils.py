@@ -4,10 +4,9 @@ from PIL import Image
 
 def read_image(path: str, is_gray: bool = True) -> np.ndarray:
     """Đọc ảnh và trả về mảng NumPy."""
-    image = Image.open(path)
-    if is_gray:
-        image = image.convert("L")
-    return np.asarray(image)
+    with Image.open(path) as image:
+        image = image.convert("L" if is_gray else "RGB")
+        return np.asarray(image).copy()
 
 
 def save_image(path: str, image: np.ndarray) -> None:
@@ -40,13 +39,14 @@ def bgr_to_gray(image):
 
 
 def order_points(pts):
+    """Return four cyclic corners, starting with the topmost (then leftmost).
+
+    Unlike independent sum/difference argmins this cannot duplicate a corner
+    for diamonds or boxes rotated exactly 45 degrees.
     """
-    Sắp xếp 4 điểm: Trên-Trái (TL), Trên-Phải (TR), Dưới-Phải (BR), Dưới-Trái (BL).
-    :param pts: Mảng 4 điểm (shape: 4x2)
-    """
-    # Trường hợp góc 45 độ có thể chọn trùng đỉnh bằng tổng/hiệu.
-    # Xếp vòng quanh tâm luôn giữ đủ bốn đỉnh và đúng các cạnh đối diện.
-    center = np.mean(pts, axis=0)
-    angles = np.arctan2(pts[:, 1] - center[1], pts[:, 0] - center[0])
-    rect = np.asarray(pts, dtype=np.float32)[np.argsort(angles)]
-    return np.roll(rect, -np.argmin(rect.sum(axis=1)), axis=0)
+    points = np.asarray(pts, dtype=np.float32).reshape(4, 2)
+    center = points.mean(axis=0)
+    angles = np.arctan2(points[:, 1]-center[1], points[:, 0]-center[0])
+    ordered = points[np.argsort(angles)]
+    first = np.lexsort((ordered[:, 0], ordered[:, 1]))[0]
+    return np.roll(ordered, -first, axis=0)

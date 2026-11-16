@@ -1,11 +1,10 @@
 import cv2
 import numpy as np
-from collections import deque
 
 from spatial_filters import convolve_2d
 
 
-def canny_opencv(
+def canny_edge_detection(
     image: np.ndarray,
     low_threshold: float = 50,
     high_threshold: float = 100,
@@ -29,51 +28,6 @@ def canny_opencv(
         apertureSize=aperture_size,
         L2gradient=l2_gradient,
     )
-
-
-def canny_edge_detection(image, low_threshold=50, high_threshold=100):
-    """Canny tự cài: Sobel, làm mảnh biên, ngưỡng kép và nối biên.
-
-    Ảnh đầu vào đã được làm mịn Gaussian ở chương trình chính.
-    Dùng độ lớn L1 để gần với cấu hình Canny OpenCV mặc định.
-    """
-    if image.ndim != 2 or not 0 <= low_threshold <= high_threshold:
-        raise ValueError("Cần ảnh xám và 0 <= ngưỡng thấp <= ngưỡng cao.")
-    kx = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]])
-    gx = convolve_2d(image, kx)
-    gy = convolve_2d(image, kx.T)
-    magnitude = np.abs(gx) + np.abs(gy)
-    angle = np.rad2deg(np.arctan2(gy, gx)) % 180
-    thin = np.zeros_like(magnitude)
-    h, w = image.shape
-    # So sánh hai láng giềng theo hướng gradient.
-    for y in range(1, h - 1):
-        for x in range(1, w - 1):
-            a = angle[y, x]
-            if a < 22.5 or a >= 157.5:
-                p, q = magnitude[y, x - 1], magnitude[y, x + 1]
-            elif a < 67.5:
-                p, q = magnitude[y - 1, x - 1], magnitude[y + 1, x + 1]
-            elif a < 112.5:
-                p, q = magnitude[y - 1, x], magnitude[y + 1, x]
-            else:
-                p, q = magnitude[y - 1, x + 1], magnitude[y + 1, x - 1]
-            if magnitude[y, x] > p and magnitude[y, x] >= q:
-                thin[y, x] = magnitude[y, x]
-    result = np.zeros(image.shape, dtype=np.uint8)
-    strong = (thin > 0) & (thin >= high_threshold)
-    result[strong] = 255
-    queue = deque(zip(*np.where(strong)))
-    while queue:
-        y, x = queue.popleft()
-        for dy in (-1, 0, 1):
-            for dx in (-1, 0, 1):
-                ny, nx = y + dy, x + dx
-                if 0 <= ny < h and 0 <= nx < w:
-                    if result[ny, nx] == 0 and thin[ny, nx] > 0 and thin[ny, nx] >= low_threshold:
-                        result[ny, nx] = 255
-                        queue.append((ny, nx))
-    return result
 
 
 def sobel_edge_detection(image: np.ndarray) -> np.ndarray:

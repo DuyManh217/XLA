@@ -3,7 +3,6 @@ from pathlib import Path
 import queue
 import threading
 import copy
-import csv
 import cv2
 import numpy as np
 import tkinter as tk
@@ -21,6 +20,8 @@ class ImagePanel(ttk.Frame):
         self.array = None
         self.photo = None
         self.pending = None
+        self.zoom = 1.0
+        self.pan = (0, 0)
         self.canvas = tk.Canvas(self, bg='#101a2d', highlightthickness=0)
         self.canvas.pack(fill='both', expand=True)
         self.canvas.bind('<Configure>', self.schedule)
@@ -31,7 +32,37 @@ class ImagePanel(ttk.Frame):
         self.pending = self.after(60, self.render)
 
     def show(self, array):
+        if array is None:
+            self.zoom, self.pan = 1.0, (0, 0)
         self.array = array
+        self.render()
+
+    def display_size(self):
+        h, w = self.array.shape[:2]
+        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+        fit = min(1, max(1, cw-24)/w, max(1, ch-24)/h)
+        return max(1, round(w*fit*self.zoom)), max(1, round(h*fit*self.zoom))
+
+    def zoom_at(self, factor, x=None, y=None):
+        if self.array is None:
+            return
+        x = self.canvas.winfo_width()/2 if x is None else x
+        y = self.canvas.winfo_height()/2 if y is None else y
+        old_x = (x-self.origin[0])/self.ratio[0]
+        old_y = (y-self.origin[1])/self.ratio[1]
+        self.zoom = min(8, max(1, self.zoom*factor))
+        iw, ih = self.display_size()
+        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+        self.pan = (x-old_x*iw/self.array.shape[1]-(cw-iw)/2,
+                    y-old_y*ih/self.array.shape[0]-(ch-ih)/2)
+        self.render()
+
+    def reset_view(self):
+        self.zoom, self.pan = 1.0, (0, 0)
+        self.render()
+
+    def pan_by(self, dx, dy):
+        self.pan = (self.pan[0]+dx, self.pan[1]+dy)
         self.render()
 
     def render(self):
@@ -41,12 +72,11 @@ class ImagePanel(ttk.Frame):
         if self.array is None:
             self.canvas.create_text(w/2, h/2, text='Chọn ảnh để bắt đầu', fill='#aab9cf', font=('Segoe UI', 17))
             return
-        image = Image.fromarray(self.array)
-        image.thumbnail((max(1, w-24), max(1, h-24)), Image.Resampling.LANCZOS)
-        self.origin = ((w-image.width)/2, (h-image.height)/2)
+        image = Image.fromarray(self.array).resize(self.display_size(), Image.Resampling.LANCZOS)
+        self.origin = ((w-image.width)/2+self.pan[0], (h-image.height)/2+self.pan[1])
         self.ratio = (image.width/self.array.shape[1], image.height/self.array.shape[0])
         self.photo = ImageTk.PhotoImage(image)
-        self.canvas.create_image(w/2, h/2, image=self.photo)
+        self.canvas.create_image(*self.origin, image=self.photo, anchor='nw')
 
 
 class App(tk.Tk):
@@ -67,18 +97,20 @@ class App(tk.Tk):
         self.summary = tk.StringVar(value='Chưa có ảnh')
         self.stage = tk.StringVar(value='Kết quả')
         self.method = tk.StringVar(value='Canny')
-        self.tool = tk.StringVar(value='Khoanh vùng')
-        self.keep_existing = tk.BooleanVar(value=True)
-        self.confirmed = tk.BooleanVar(value=False)
+        self.method.set('GrabCut')
         self.selection = {}
-        self.reference_points = []
         self.drag_start = None
+        self.pan_start = None
+        self.pan_moved = False
+        self.tool = tk.StringVar(value='Khoanh vùng')
+        self.confirmed = tk.BooleanVar(value=False)
+        self.keep_existing = tk.BooleanVar(value=True)
         self.blur = tk.StringVar(value='7')
         self.low = tk.StringVar(value='50')
         self.high = tk.StringVar(value='100')
         self.close_kernel = tk.StringVar(value='3')
         self.min_area = tk.StringVar(value='100')
-        self.max_side = tk.StringVar(value='1000')
+        self.max_side = tk.StringVar(value='1400')
         self.exclude_border = tk.BooleanVar(value=True)
         self.ref_choice = tk.StringVar(value='')
         self.ref_size = tk.StringVar(value='')
@@ -95,13 +127,8 @@ class App(tk.Tk):
         style.configure('Accent.TButton', background='#155ed6', foreground='white')
         style.configure('Treeview', rowheight=28, font=('Segoe UI', 10))
         self.build()
-        self.panel.canvas.bind('<ButtonPress-1>', self.edit_start)
-        self.panel.canvas.bind('<B1-Motion>', self.edit_move)
-        self.panel.canvas.bind('<ButtonRelease-1>', self.edit_end)
-        for var in (self.blur, self.low, self.high, self.close_kernel, self.min_area, self.max_side, self.exclude_border):
+        for var in (self.method, self.blur, self.low, self.high, self.close_kernel, self.min_area, self.max_side, self.exclude_border):
             var.trace_add('write', self.mark_dirty)
-        self.method.trace_add('write', self.on_method_change)
-        self.update_method_ui()
         self.after(100, self.poll)
         self.bind('<Control-o>', lambda e: self.open_image())
         self.bind('<Control-s>', lambda e: self.save_bundle())
@@ -116,8 +143,7 @@ class App(tk.Tk):
         toolbar.pack(fill='x')
         self.open_btn = ttk.Button(toolbar, text='＋ Chọn ảnh', style='Accent.TButton', command=self.open_image)
         self.open_btn.pack(side='left')
-        samples = [p.name for p in sorted((ROOT/'images').iterdir()) if p.suffix.lower() in ('.png', '.jpg', '.jpeg')]
-        self.sample_box = ttk.Combobox(toolbar, state='readonly', width=18, values=samples)
+        self.sample_box = ttk.Combobox(toolbar, state='readonly', width=18, values=[p.name for p in sorted((ROOT/'images').glob('*.png'))])
         self.sample_box.set('Mở ảnh mẫu…')
         self.sample_box.pack(side='left', padx=10)
         self.sample_box.bind('<<ComboboxSelected>>', lambda e: self.open_path(ROOT/'images'/self.sample_box.get()))
@@ -141,108 +167,46 @@ class App(tk.Tk):
         side_canvas.bind('<Configure>', lambda e: side_canvas.itemconfigure(side_window, width=e.width))
         settings = ttk.LabelFrame(side, text='1. Tham số xử lý', padding=10)
         settings.pack(fill='x')
-        self.settings_frame = settings
         self.parameter_widgets = []
-
-        # Hàng phương pháp (Luôn hiển thị)
-        self.row_method = ttk.Frame(settings)
-        self.row_method.pack(fill='x', pady=3)
-        ttk.Label(self.row_method, text='Phương pháp', font=('Segoe UI', 9)).pack(side='left')
-        method_combo = ttk.Combobox(self.row_method, textvariable=self.method,
-                                    values=['Canny', 'GrabCut', 'Otsu light', 'Otsu dark'],
-                                    width=11, state='readonly')
-        method_combo.pack(side='right')
-        method_combo.bind('<<ComboboxSelected>>', lambda e: self.update_method_ui())
-        self.parameter_widgets.append((method_combo, 'readonly'))
-
-        # Hàng Gaussian (Dùng cho Canny, Otsu)
-        self.row_blur = ttk.Frame(settings)
-        ttk.Label(self.row_blur, text='Gaussian', font=('Segoe UI', 9)).pack(side='left')
-        blur_combo = ttk.Combobox(self.row_blur, textvariable=self.blur,
-                                  values=[1, 3, 5, 7, 9, 11, 15], width=11, state='readonly')
-        blur_combo.pack(side='right')
-        self.parameter_widgets.append((blur_combo, 'readonly'))
-
-        # Hàng Canny thấp (Chỉ dùng cho Canny)
-        self.row_low = ttk.Frame(settings)
-        ttk.Label(self.row_low, text='Canny thấp', font=('Segoe UI', 9)).pack(side='left')
-        low_entry = ttk.Entry(self.row_low, textvariable=self.low, width=13)
-        low_entry.pack(side='right')
-        self.parameter_widgets.append((low_entry, 'normal'))
-
-        # Hàng Canny cao (Chỉ dùng cho Canny)
-        self.row_high = ttk.Frame(settings)
-        ttk.Label(self.row_high, text='Canny cao', font=('Segoe UI', 9)).pack(side='left')
-        high_entry = ttk.Entry(self.row_high, textvariable=self.high, width=13)
-        high_entry.pack(side='right')
-        self.parameter_widgets.append((high_entry, 'normal'))
-
-        # Hàng Kernel đóng (Dùng cho Canny, Otsu)
-        self.row_close = ttk.Frame(settings)
-        ttk.Label(self.row_close, text='Kernel đóng', font=('Segoe UI', 9)).pack(side='left')
-        close_combo = ttk.Combobox(self.row_close, textvariable=self.close_kernel,
-                                   values=[1, 3, 5, 7, 9], width=11, state='readonly')
-        close_combo.pack(side='right')
-        self.parameter_widgets.append((close_combo, 'readonly'))
-
-        # Hàng Diện tích min (Chung cho tất cả)
-        self.row_min_area = ttk.Frame(settings)
-        ttk.Label(self.row_min_area, text='Diện tích min (px²)', font=('Segoe UI', 9)).pack(side='left')
-        min_area_entry = ttk.Entry(self.row_min_area, textvariable=self.min_area, width=13)
-        min_area_entry.pack(side='right')
-        self.parameter_widgets.append((min_area_entry, 'normal'))
-
-        # Hàng Cạnh xử lý tối đa (Chung cho tất cả)
-        self.row_max_side = ttk.Frame(settings)
-        ttk.Label(self.row_max_side, text='Cạnh tối đa (px)', font=('Segoe UI', 9)).pack(side='left')
-        max_side_combo = ttk.Combobox(self.row_max_side, textvariable=self.max_side,
-                                      values=[800, 1000, 1400, 2000, 2400], width=11, state='readonly')
-        max_side_combo.pack(side='right')
-        self.parameter_widgets.append((max_side_combo, 'readonly'))
-
-        # Hàng Bỏ vật sát mép ảnh (Chung cho tất cả)
-        self.row_border = ttk.Frame(settings)
-        check = ttk.Checkbutton(self.row_border, text='Bỏ vật sát mép ảnh', variable=self.exclude_border)
-        check.pack(side='left', pady=2)
+        fields = [('Phương pháp', self.method, ['GrabCut', 'Canny', 'Otsu light', 'Otsu dark']),
+                  ('Gaussian', self.blur, [1, 3, 5, 7, 9, 11, 15]),
+                  ('Canny thấp', self.low, None), ('Canny cao', self.high, None),
+                  ('Kernel đóng', self.close_kernel, [1, 3, 5, 7, 9]),
+                  ('Diện tích min (px² xử lý)', self.min_area, None),
+                  ('Cạnh xử lý tối đa (px)', self.max_side, [800, 1000, 1400, 2000, 2400])]
+        for i, (label, var, values) in enumerate(fields):
+            ttk.Label(settings, text=label, font=('Segoe UI', 9)).grid(row=i, column=0, sticky='w', pady=4)
+            widget = ttk.Combobox(settings, textvariable=var, values=values, width=10, state='readonly') if values else ttk.Entry(settings, textvariable=var, width=12)
+            widget.grid(row=i, column=1, sticky='e', padx=(5, 0))
+            self.parameter_widgets.append((widget, 'readonly' if values else 'normal'))
+        check = ttk.Checkbutton(settings, text='Bỏ vật sát mép ảnh', variable=self.exclude_border)
+        check.grid(row=7, columnspan=2, sticky='w', pady=6)
         self.parameter_widgets.append((check, 'normal'))
-
-        # Nút Áp dụng / Xử lý lại (F5)
-        self.run_btn = ttk.Button(settings, text='Áp dụng / Xử lý lại (F5)', command=self.run)
-
-        # 2. Khung Tương tác GrabCut (CHỈ HIỂN THỊ KHI CHỌN GRABCUT)
-        self.edit_frame = ttk.LabelFrame(side, text='2. Chọn & sửa vật (GrabCut)', padding=10)
-        self.tool_combo = ttk.Combobox(self.edit_frame, textvariable=self.tool, state='readonly',
-                                       values=['Khoanh vùng', 'Giữ vật', 'Loại nền', 'Vẽ đa giác'])
-        self.tool_combo.pack(fill='x')
-        ttk.Label(self.edit_frame, text='Kéo khoanh vùng → F5. Tô giữ/loại → F5.\nĐa giác: bấm các đỉnh rồi F5.',
+        self.edit_frame = ttk.LabelFrame(side, text='Chọn và sửa vùng vật', padding=10)
+        ttk.Combobox(self.edit_frame, textvariable=self.tool, state='readonly',
+                     values=['Khoanh vùng', 'Giữ vật', 'Loại nền', 'Vẽ đa giác']).pack(fill='x')
+        ttk.Label(self.edit_frame, text='Kéo khoanh vùng rồi F5. Tô giữ/loại rồi F5. Đa giác: bấm các đỉnh rồi F5.',
                   wraplength=260).pack(anchor='w', pady=5)
         ttk.Checkbutton(self.edit_frame, text='Giữ các vật cũ ngoài vùng chọn', variable=self.keep_existing).pack(anchor='w', pady=(0, 4))
-        ttk.Button(self.edit_frame, text='Hoàn tác nét / đỉnh', command=self.undo_edit).pack(fill='x', pady=2)
-        ttk.Button(self.edit_frame, text='Xóa vùng chọn', command=self.reset_selection).pack(fill='x', pady=2)
-        ttk.Checkbutton(self.edit_frame, text='Tôi đã kiểm tra đúng đường bao', variable=self.confirmed).pack(anchor='w', pady=(4, 0))
-
-        # 3. Khung Hiệu chuẩn kích thước (Luôn hiển thị)
-        self.cal_frame = ttk.LabelFrame(side, text='Hiệu chuẩn kích thước', padding=10)
-        self.cal_frame.pack(fill='x', pady=(12, 0))
-        ttk.Label(self.cal_frame, text='Cách 1: Theo vật chuẩn trên ảnh:').pack(anchor='w')
-        self.ref_box = ttk.Combobox(self.cal_frame, textvariable=self.ref_choice, state='readonly', values=[])
+        ttk.Button(self.edit_frame, text='Hoàn tác nét/đỉnh', command=self.undo_selection).pack(fill='x')
+        ttk.Button(self.edit_frame, text='Xóa vùng chọn', command=self.reset_selection).pack(fill='x')
+        self.run_btn = ttk.Button(settings, text='Áp dụng / Xử lý lại (F5)', command=self.run)
+        self.run_btn.grid(row=8, columnspan=2, sticky='ew')
+        cal = ttk.LabelFrame(side, text='2. Hiệu chuẩn kích thước', padding=10)
+        cal.pack(fill='x', pady=(12, 0))
+        ttk.Label(cal, text='Chọn vật chuẩn theo ID trên ảnh:').pack(anchor='w')
+        self.ref_box = ttk.Combobox(cal, textvariable=self.ref_choice, state='readonly', values=[])
         self.ref_box.pack(fill='x', pady=5)
-        ttk.Combobox(self.cal_frame, textvariable=self.ref_axis, state='readonly', values=['Cạnh dài', 'Cạnh ngắn']).pack(fill='x')
-        ttk.Label(self.cal_frame, text='Kích thước thực:').pack(anchor='w', pady=(6, 3))
-        line = ttk.Frame(self.cal_frame)
+        ttk.Combobox(cal, textvariable=self.ref_axis, state='readonly', values=['Cạnh dài', 'Cạnh ngắn']).pack(fill='x')
+        ttk.Label(cal, text='Kích thước thực của cạnh đã chọn:').pack(anchor='w', pady=(6, 3))
+        line = ttk.Frame(cal)
         line.pack(fill='x')
         ttk.Entry(line, textvariable=self.ref_size, width=12).pack(side='left', fill='x', expand=True)
         ttk.Combobox(line, textvariable=self.unit, state='readonly', values=['mm', 'cm', 'in'], width=5).pack(side='right', padx=(6, 0))
-        self.cal_btn = ttk.Button(self.cal_frame, text='Áp dụng vật chuẩn', command=self.calibrate, state='disabled')
+        self.cal_btn = ttk.Button(cal, text='Áp dụng vật chuẩn', command=self.calibrate, state='disabled')
         self.cal_btn.pack(fill='x', pady=(8, 4))
-
-        ttk.Separator(self.cal_frame, orient='horizontal').pack(fill='x', pady=8)
-        ttk.Label(self.cal_frame, text='Cách 2: Theo thước/đoạn chuẩn:').pack(anchor='w')
-        ttk.Button(self.cal_frame, text='✏️ Kéo đoạn chuẩn trên ảnh', command=self.activate_line_tool).pack(fill='x', pady=(3, 3))
-        ttk.Button(self.cal_frame, text='Áp dụng đoạn chuẩn đã kéo', command=self.calibrate_line).pack(fill='x', pady=(0, 4))
-
-        self.clear_btn = ttk.Button(self.cal_frame, text='Bỏ hiệu chuẩn → pixel', command=self.clear_calibration, state='disabled')
-        self.clear_btn.pack(fill='x', pady=(4, 0))
+        self.clear_btn = ttk.Button(cal, text='Bỏ hiệu chuẩn → pixel', command=self.clear_calibration, state='disabled')
+        self.clear_btn.pack(fill='x')
         ttk.Label(side, text='Vật chuẩn và vật đo phải cùng mặt phẳng.\nChụp gần vuông góc, nền tương phản,\ncác vật tách rời nhau.\n\nCạnh dài/ngắn là cạnh hộp bao xoay;\nkết quả đo chỉ là ước lượng.', wraplength=265, foreground='#52627b', font=('Segoe UI', 9)).pack(anchor='w', pady=12)
         main = ttk.Frame(content)
         main.pack(side='left', fill='both', expand=True)
@@ -253,13 +217,25 @@ class App(tk.Tk):
                               values=['Kết quả', 'Ảnh gốc', 'Ảnh xám', 'Lọc Gaussian', 'Biên / Nhị phân', 'Đóng hình thái', 'Vùng vật'])
         selector.pack(side='right')
         selector.bind('<<ComboboxSelected>>', lambda e: self.refresh_image())
+        ttk.Button(top, text='Vừa khung', command=lambda: self.panel.reset_view()).pack(side='right', padx=3)
+        ttk.Button(top, text='＋', width=3, command=lambda: self.panel.zoom_at(1.25)).pack(side='right')
+        ttk.Button(top, text='－', width=3, command=lambda: self.panel.zoom_at(0.8)).pack(side='right')
         self.panel = ImagePanel(main)
         self.panel.pack(fill='both', expand=True)
-        ttk.Label(main, text='BẢNG KÍCH THƯỚC  •  Chọn một dòng để đánh dấu vật trên ảnh', font=('Segoe UI', 9, 'bold')).pack(anchor='w', pady=(10, 5))
+        self.panel.canvas.bind('<ButtonPress-1>', self.edit_start)
+        self.panel.canvas.bind('<B1-Motion>', self.edit_move)
+        self.panel.canvas.bind('<ButtonRelease-1>', self.edit_end)
+        self.panel.canvas.bind('<MouseWheel>', lambda e: self.panel.zoom_at(1.25 if e.delta > 0 else 0.8, e.x, e.y))
+        self.panel.canvas.bind('<Button-4>', lambda e: self.panel.zoom_at(1.25, e.x, e.y))
+        self.panel.canvas.bind('<Button-5>', lambda e: self.panel.zoom_at(0.8, e.x, e.y))
+        self.panel.canvas.bind('<ButtonPress-3>', self.view_start)
+        self.panel.canvas.bind('<B3-Motion>', self.view_move)
+        self.panel.canvas.bind('<ButtonRelease-3>', self.view_end)
+        ttk.Label(main, text='BẢNG KÍCH THƯỚC  •  Con lăn: phóng to  •  Chuột phải: chọn vật  •  Kéo chuột phải: di chuyển ảnh', font=('Segoe UI', 9, 'bold')).pack(anchor='w', pady=(10, 5))
         table_frame = ttk.Frame(main)
         table_frame.pack(fill='x')
-        self.table = ttk.Treeview(table_frame, columns=('id', 'role', 'long', 'short', 'unit', 'area', 'perimeter'), show='headings', height=5, selectmode='browse')
-        for key, label, width in [('id', 'ID', 40), ('role', 'Vai trò', 80), ('long', 'Dài', 80), ('short', 'Rộng', 80), ('unit', 'Đơn vị', 50), ('area', 'Diện tích bao (đv²)', 130), ('perimeter', 'Chu vi (đv)', 100)]:
+        self.table = ttk.Treeview(table_frame, columns=('id', 'role', 'long', 'short', 'unit', 'area'), show='headings', height=5, selectmode='browse')
+        for key, label, width in [('id', 'ID', 45), ('role', 'Vai trò', 95), ('long', 'Cạnh dài', 105), ('short', 'Cạnh ngắn', 105), ('unit', 'Đơn vị', 65), ('area', 'Diện tích đường bao', 175)]:
             self.table.heading(key, text=label)
             self.table.column(key, width=width, anchor='center')
         self.table.pack(side='left', fill='x', expand=True)
@@ -267,66 +243,16 @@ class App(tk.Tk):
         scrollbar.pack(side='right', fill='y')
         self.table.configure(yscrollcommand=scrollbar.set)
         self.table.bind('<<TreeviewSelect>>', self.select_row)
-        ttk.Button(main, text='Lưu bảng CSV', command=self.save_csv).pack(anchor='e')
-        ttk.Button(main, text='Bỏ vùng đang chọn khỏi kết quả', command=self.remove_region).pack(anchor='e')
+        self.confirm_box = ttk.Checkbutton(main, text='Tôi đã kiểm tra đường bao của vật cần đo', variable=self.confirmed)
+        self.confirm_box.pack(anchor='w', pady=4)
+        ttk.Button(main, text='Bỏ vùng đang chọn', command=self.remove_region).pack(anchor='e')
+        self.method.trace_add('write', self.method_changed)
+        self.method_changed()
         footer = ttk.Frame(self, padding=(20, 10))
         footer.pack(fill='x')
         self.progress = ttk.Progressbar(footer, mode='indeterminate', length=110)
         self.progress.pack(side='right', padx=(10, 0))
         ttk.Label(footer, textvariable=self.status, wraplength=1050).pack(side='left')
-
-    def on_method_change(self, *_):
-        self.update_method_ui()
-        if self.result and not self.busy:
-            if self.method.get() == 'GrabCut' and self.result.objects:
-                self.status.set('Đã bật GrabCut. Kéo khoanh vùng quanh vật cần sửa/thêm rồi bấm F5 (vật cũ bên ngoài được giữ nguyên).')
-            else:
-                self.mark_dirty()
-
-    def update_method_ui(self, *args):
-        method = self.method.get()
-
-        # Ẩn tất cả các hàng tham số để sắp xếp lại theo phương pháp
-        for row in (self.row_blur, self.row_low, self.row_high, self.row_close,
-                    self.row_min_area, self.row_max_side, self.row_border):
-            row.pack_forget()
-        self.run_btn.pack_forget()
-
-        if method == 'Canny':
-            # Canny: hiển thị các tham số lọc biên tự động
-            self.row_blur.pack(fill='x', pady=3)
-            self.row_low.pack(fill='x', pady=3)
-            self.row_high.pack(fill='x', pady=3)
-            self.row_close.pack(fill='x', pady=3)
-            self.row_min_area.pack(fill='x', pady=3)
-            self.row_max_side.pack(fill='x', pady=3)
-            self.row_border.pack(fill='x', pady=4)
-            # Ẩn khung tương tác vẽ của GrabCut
-            self.edit_frame.pack_forget()
-        elif method in ('Otsu light', 'Otsu dark'):
-            # Otsu: ẩn Canny thấp, Canny cao (Otsu tự tính ngưỡng)
-            self.row_blur.pack(fill='x', pady=3)
-            self.row_close.pack(fill='x', pady=3)
-            self.row_min_area.pack(fill='x', pady=3)
-            self.row_max_side.pack(fill='x', pady=3)
-            self.row_border.pack(fill='x', pady=4)
-            # Ẩn khung tương tác vẽ của GrabCut
-            self.edit_frame.pack_forget()
-        elif method == 'GrabCut':
-            # GrabCut: chỉ cần diện tích min, cạnh tối đa, bỏ viền
-            self.row_min_area.pack(fill='x', pady=3)
-            self.row_max_side.pack(fill='x', pady=3)
-            self.row_border.pack(fill='x', pady=4)
-            # Hiện khung tương tác GrabCut trước khung hiệu chuẩn
-            self.edit_frame.pack(fill='x', pady=8, before=self.cal_frame)
-            if self.tool.get() not in ('Khoanh vùng', 'Giữ vật', 'Loại nền', 'Vẽ đa giác'):
-                self.tool.set('Khoanh vùng')
-
-        self.run_btn.pack(fill='x', pady=(8, 2))
-
-    def activate_line_tool(self):
-        self.tool.set('Đoạn chuẩn')
-        self.status.set('Chế độ kéo đoạn chuẩn: Kéo một đường thẳng giữa 2 đầu đoạn trên ảnh rồi nhập kích thước thực bên dưới.')
 
     def mark_dirty(self, *_):
         if self.result and not self.busy:
@@ -344,11 +270,7 @@ class App(tk.Tk):
         if self.busy:
             return
         self.path = str(path)
-        self.result = None
-        self.rows = []
-        self.calibration = None
         self.selection = {}
-        self.reference_points = []
         self.confirmed.set(False)
         self.run()
 
@@ -394,37 +316,29 @@ class App(tk.Tk):
         if selection and self.result and settings.max_side != self.result.settings.max_side:
             messagebox.showinfo('Vùng chọn', 'Xóa vùng chọn trước khi thay kích thước xử lý, rồi chọn lại.')
             return
-
-        keep_old = (
-            settings.method == 'GrabCut'
-            and self.result is not None
-            and bool(self.result.objects)
-            and self.keep_existing.get()
-        )
+        keep_old = (settings.method == 'GrabCut' and self.result is not None
+                    and Path(self.result.source) == Path(path).resolve()
+                    and bool(self.result.objects) and self.keep_existing.get())
         if keep_old and not selection:
-            messagebox.showinfo('Chọn vùng GrabCut', 'Hãy kéo khoanh vùng hoặc vẽ đa giác quanh vật cần thêm/sửa trước khi bấm Áp dụng (F5).')
+            messagebox.showinfo('Vùng chọn', 'Hãy khoanh vùng vật cần thêm hoặc sửa trước khi bấm F5.')
             return
-
         prev_result = self.result
         if not keep_old:
-            self.confirmed.set(False)
-            self.reference_points = []
             self.result, self.rows, self.calibration = None, [], None
             self.ref_choice.set('')
             self.ref_box.configure(values=[])
             self.table.delete(*self.table.get_children())
             self.panel.show(None)
-
+        self.confirmed.set(False)
         self.summary.set('Đang xử lý…')
         self.set_busy(True)
         self.status.set(f'Đang xử lý {Path(path).name}…')
+
         def worker():
             try:
-                if keep_old:
-                    res = apply_grabcut(prev_result, settings, selection, keep_existing=True)
-                else:
-                    res = process(path, settings, selection)
-                self.messages.put(('ok', res))
+                result = (apply_grabcut(prev_result, settings, selection) if keep_old
+                          else process(path, settings, selection))
+                self.messages.put(('ok', result))
             except Exception as error:
                 self.messages.put(('error', str(error)))
         threading.Thread(target=worker, daemon=True).start()
@@ -438,9 +352,7 @@ class App(tk.Tk):
             if kind == 'ok':
                 self.result = payload
                 self.dirty = False
-                self.confirmed.set(False)
-                valid_ids = {o['id'] for o in payload.objects}
-                if self.calibration and self.calibration.get('reference_id') is not None and self.calibration['reference_id'] not in valid_ids:
+                if self.calibration and self.calibration['reference_id'] not in {o['id'] for o in payload.objects}:
                     self.calibration = None
                     self.ref_choice.set('')
                 self.ref_box.configure(values=[str(o['id']) for o in payload.objects])
@@ -448,7 +360,7 @@ class App(tk.Tk):
                 self.refresh_rows()
                 w, h = payload.original_size
                 self.summary.set(f'{len(payload.objects)} vật thể  |  {w} × {h} px  |  {payload.seconds:.2f} s')
-                self.status.set(f'{len(payload.objects)} vùng đề xuất. Kiểm tra đường bao trước khi lưu; chưa hiệu chuẩn → pixel.' if payload.objects else 'Kéo khoanh vùng quanh vật rồi bấm F5. Có thể tô giữ vật/loại nền hoặc vẽ đa giác.')
+                self.status.set(f'{len(payload.objects)} vùng tìm được; hãy kiểm tra đường bao.' if payload.objects else 'GrabCut: khoanh vùng quanh vật rồi bấm F5. Chưa có vật: thử điều chỉnh phương pháp hoặc tham số.')
             else:
                 if self.result is not None:
                     w, h = self.result.original_size
@@ -466,7 +378,7 @@ class App(tk.Tk):
         self.table.delete(*self.table.get_children())
         for row in self.rows:
             self.table.insert('', 'end', iid=str(row['id']), values=(row['id'], 'Vật chuẩn' if row['is_reference'] else 'Vật đo',
-                              f"{row['long']:.2f}", f"{row['short']:.2f}", row['unit'], f"{row['area']:.2f}", f"{row['perimeter']:.2f}"))
+                              f"{row['long']:.2f}", f"{row['short']:.2f}", row['unit'], f"{row['area_px2']:.1f}"))
         self.refresh_image()
 
     def refresh_image(self):
@@ -474,20 +386,149 @@ class App(tk.Tk):
             return
         selected = self.table.selection()
         selected_id = int(selected[0]) if selected else None
-        image = annotate(self.result, self.rows, selected_id, self.calibration) if self.stage.get() == 'Kết quả' else self.result.stages[self.stage.get()]
+        image = annotate(self.result, self.rows, selected_id) if self.stage.get() == 'Kết quả' else self.result.stages[self.stage.get()]
         self.panel.show(image)
+
+    def method_changed(self, *_):
+        if self.method.get() == 'GrabCut':
+            self.edit_frame.pack(fill='x', pady=8, before=self.cal_btn.master)
+        else:
+            self.edit_frame.pack_forget()
+        self.tool.set('Khoanh vùng')
+
+    def image_point(self, event):
+        if self.result is None:
+            return None
+        ox, oy = self.panel.origin
+        rx, ry = self.panel.ratio
+        x, y = (event.x-ox)/rx, (event.y-oy)/ry
+        h, w = self.result.stages['Ảnh gốc'].shape[:2]
+        return (int(x), int(y)) if 0 <= x < w and 0 <= y < h else None
+
+    def view_start(self, event):
+        self.pan_start = (event.x, event.y)
+        self.pan_moved = False
+
+    def view_move(self, event):
+        if self.pan_start is None:
+            return
+        dx, dy = event.x-self.pan_start[0], event.y-self.pan_start[1]
+        if dx or dy:
+            self.pan_moved = True
+            self.panel.pan_by(dx, dy)
+            self.pan_start = (event.x, event.y)
+
+    def view_end(self, event):
+        self.pan_start = None
+        if self.pan_moved or self.result is None:
+            return
+        point = self.image_point(event)
+        if point is None:
+            return
+        matches = [obj for obj in self.result.objects
+                   if cv2.pointPolygonTest(np.asarray(obj['contour'], np.float32), point, False) >= 0]
+        if matches:
+            obj = min(matches, key=lambda item: item['area_px2'])
+            self.table.selection_set(str(obj['id']))
+            self.table.see(str(obj['id']))
+
+    def edit_start(self, event):
+        if self.method.get() != 'GrabCut' or self.busy:
+            return
+        p = self.image_point(event)
+        if p is None:
+            return
+        self.drag_start = p
+        self.confirmed.set(False)
+        self.dirty = True
+        tool = self.tool.get()
+        if tool == 'Khoanh vùng':
+            self.selection = {'rect': [*p, *p], 'strokes': []}
+        elif tool == 'Vẽ đa giác':
+            self.selection.setdefault('polygon', []).append(p)
+        elif 'rect' in self.selection:
+            self.selection.setdefault('strokes', []).append((tool == 'Giữ vật', [p]))
+        self.show_selection()
+
+    def edit_move(self, event):
+        if self.drag_start is None:
+            return
+        p = self.image_point(event)
+        if p is None:
+            return
+        tool = self.tool.get()
+        if tool == 'Khoanh vùng':
+            self.selection['rect'] = [*self.drag_start, *p]
+        elif tool in ('Giữ vật', 'Loại nền') and self.selection.get('strokes'):
+            self.selection['strokes'][-1][1].append(p)
+        self.show_selection()
+
+    def edit_end(self, event):
+        self.edit_move(event)
+        self.drag_start = None
+
+    def show_selection(self):
+        if self.result is None:
+            return
+        image = self.result.stages['Ảnh gốc'].copy()
+        rect = self.selection.get('rect')
+        if rect:
+            cv2.rectangle(image, tuple(rect[:2]), tuple(rect[2:]), (255,190,20), 2)
+        for keep, points in self.selection.get('strokes', []):
+            color = (20,220,70) if keep else (240,50,50)
+            for p in points:
+                cv2.circle(image, tuple(p), 4, color, -1)
+        if self.selection.get('polygon'):
+            cv2.polylines(image, [np.asarray(self.selection['polygon'],np.int32)], True, (255,190,20), 2)
+        self.panel.show(image)
+
+    def undo_selection(self):
+        if self.selection.get('polygon'):
+            self.selection['polygon'].pop()
+        elif self.selection.get('strokes'):
+            self.selection['strokes'].pop()
+        self.confirmed.set(False)
+        self.dirty = True
+        self.show_selection()
+
+    def reset_selection(self):
+        self.selection = {}
+        self.confirmed.set(False)
+        self.dirty = True
+        self.run()
+
+    def remove_region(self):
+        chosen = self.table.selection()
+        if not chosen or self.result is None:
+            return
+        region_id = int(chosen[0])
+        self.result.objects = [o for o in self.result.objects if o['id'] != region_id]
+        rgb = self.result.stages['Ảnh gốc']
+        mask = np.zeros(rgb.shape[:2], np.uint8)
+        for obj in self.result.objects:
+            cv2.drawContours(mask, [np.asarray(obj['contour'], np.int32)], -1, 255, -1)
+        overlay = rgb.copy()
+        overlay[mask > 0] = (.55*rgb[mask > 0] + .45*np.array([30, 210, 130])).astype(np.uint8)
+        self.result.stages['Vùng vật'] = overlay
+        if self.calibration and self.calibration.get('reference_id') == region_id:
+            self.calibration = None
+        self.confirmed.set(False)
+        self.refresh_rows()
+        self.status.set(f'Đã bỏ vật #{region_id}. Còn {len(self.result.objects)} vật.')
 
     def select_row(self, event=None):
         selection = self.table.selection()
+
         if selection:
             self.ref_choice.set(selection[0])
+
         self.refresh_image()
+
+
+
 
     def calibrate(self):
         if self.result is None or self.busy:
-            return
-        if self.dirty:
-            messagebox.showinfo('Hiệu chuẩn', 'Bấm F5 xử lý lại vùng đã sửa trước.')
             return
         try:
             calibration = dict(reference_id=int(self.ref_choice.get()),
@@ -514,171 +555,27 @@ class App(tk.Tk):
         if self.dirty:
             messagebox.showinfo('Cần xử lý lại', 'Tham số đã thay đổi. Hãy bấm Áp dụng / F5 trước khi lưu.')
             return False
-        if not self.rows:
-            messagebox.showinfo('Chưa có kết quả', 'Chưa có kết quả đo nào để xuất.')
-            return False
-        if self.method.get() == 'GrabCut' and not self.confirmed.get():
-            messagebox.showinfo('Kiểm tra vùng đo', 'Chế độ GrabCut yêu cầu đánh dấu xác nhận "Tôi đã kiểm tra đúng đường bao" trước khi xuất.')
-            return False
         return True
-
-    def image_point(self, event):
-        if self.busy or self.result is None:
-            return None
-        ox, oy = self.panel.origin
-        rx, ry = self.panel.ratio
-        x, y = (event.x-ox)/rx, (event.y-oy)/ry
-        h, w = self.result.stages['Ảnh gốc'].shape[:2]
-        return (int(x), int(y)) if 0 <= x < w and 0 <= y < h else None
-
-    def edit_start(self, event):
-        p = self.image_point(event)
-        if p is None:
-            return
-        self.drag_start = p
-        tool = self.tool.get()
-        if tool == 'Đoạn chuẩn':
-            self.reference_points = [p, p]
-        else:
-            if self.method.get() != 'GrabCut':
-                self.status.set(f'Phương pháp {self.method.get()} chạy tự động. Để khoanh vùng hoặc vẽ thủ công, hãy chọn GrabCut.')
-                self.drag_start = None
-                return
-            self.dirty = True
-            self.confirmed.set(False)
-            if tool == 'Khoanh vùng':
-                self.selection = {'rect': [*p, *p], 'strokes': []}
-            elif tool == 'Vẽ đa giác':
-                if 'polygon' not in self.selection:
-                    self.selection = {'polygon': []}
-                self.selection['polygon'].append(p)
-            elif 'rect' in self.selection or 'polygon' in self.selection:
-                self.selection.setdefault('strokes', []).append((tool == 'Giữ vật', [p]))
-            else:
-                self.status.set('Hãy Khoanh vùng hoặc Vẽ đa giác trước khi tô giữ/loại.')
-        self.show_edit()
-
-    def edit_move(self, event):
-        p = self.image_point(event)
-        if p is None or self.drag_start is None:
-            return
-        tool = self.tool.get()
-        if tool == 'Đoạn chuẩn':
-            self.reference_points[-1] = p
-        elif tool == 'Khoanh vùng':
-            self.selection['rect'] = [*self.drag_start, *p]
-        elif tool in ('Giữ vật', 'Loại nền') and self.selection.get('strokes'):
-            self.selection['strokes'][-1][1].append(p)
-        self.show_edit()
-
-    def edit_end(self, event):
-        self.edit_move(event)
-        self.drag_start = None
-
-    def show_edit(self):
-        if self.result is None:
-            return
-        selected = self.table.selection()
-        selected_id = int(selected[0]) if selected else None
-        img = annotate(self.result, self.rows, selected_id, self.calibration) if self.result.objects else self.result.stages['Ảnh gốc'].copy()
-        rect = self.selection.get('rect')
-        if rect:
-            cv2.rectangle(img, tuple(rect[:2]), tuple(rect[2:]), (255, 190, 20), 2)
-        for keep, points in self.selection.get('strokes', []):
-            color = (20, 230, 80) if keep else (240, 60, 60)
-            for p in points:
-                cv2.circle(img, tuple(p), 4, color, -1)
-            for a, b in zip(points, points[1:]):
-                cv2.line(img, tuple(a), tuple(b), color, 9)
-        if self.selection.get('polygon'):
-            pts = self.selection['polygon']
-            cv2.polylines(img, [np.array(pts, np.int32)], len(pts) >= 3, (255, 190, 20), 2)
-            for p in pts:
-                cv2.circle(img, tuple(p), 4, (255, 190, 20), -1)
-        if len(self.reference_points) == 2:
-            cv2.line(img, tuple(self.reference_points[0]), tuple(self.reference_points[1]), (40, 160, 255), 2)
-        self.panel.show(img)
-
-    def undo_edit(self):
-        if self.busy:
-            return
-        if self.selection.get('strokes'):
-            self.selection['strokes'].pop()
-        elif self.selection.get('polygon'):
-            self.selection['polygon'].pop()
-        self.dirty = bool(self.selection)
-        self.confirmed.set(False)
-        self.show_edit()
-
-    def reset_selection(self):
-        if self.busy:
-            return
-        self.selection = {}
-        self.reference_points = []
-        if self.result is not None:
-            self.dirty = False
-            self.refresh_image()
-            self.status.set('Đã xóa vùng khoanh tạm; các vật đã phát hiện vẫn được giữ nguyên.')
-        else:
-            self.run()
-
-    def calibrate_line(self):
-        if self.busy or self.result is None:
-            return
-        try:
-            if self.dirty:
-                raise ValueError('Bấm F5 xử lý vùng đã sửa trước khi hiệu chuẩn.')
-            calibration = dict(reference_points=copy.deepcopy(self.reference_points),
-                               reference_size=float(self.ref_size.get().replace(',', '.')), unit=self.unit.get())
-            measurements(self.result, **calibration)
-            self.calibration = calibration
-            self.refresh_rows()
-            self.status.set('Đã hiệu chuẩn bằng đoạn chuẩn; vật chuẩn và vật đo phải cùng mặt phẳng.')
-        except ValueError as error:
-            messagebox.showerror('Đoạn chuẩn', str(error))
-
-    def save_csv(self):
-        if not self.can_save():
-            return
-        path = filedialog.asksaveasfilename(defaultextension='.csv', filetypes=[('CSV', '*.csv')])
-        if path:
-            try:
-                with open(path, 'w', encoding='utf-8-sig', newline='') as f:
-                    writer = csv.DictWriter(f, fieldnames=list(self.rows[0]))
-                    writer.writeheader()
-                    writer.writerows(self.rows)
-            except OSError as error:
-                messagebox.showerror('Lưu CSV', str(error))
-
-    def remove_region(self):
-        if self.busy or self.result is None or self.dirty:
-            return
-        selected = self.table.selection()
-        if not selected:
-            return
-        region_id = int(selected[0])
-        self.result.objects = [o for o in self.result.objects if o['id'] != region_id]
-        if self.calibration and self.calibration.get('reference_id') == region_id:
-            self.calibration = None
-        self.ref_box.configure(values=[str(o['id']) for o in self.result.objects])
-        self.confirmed.set(False)
-        self.refresh_rows()
-        self.summary.set(f'{len(self.rows)} vùng còn lại')
-        self.status.set('Đã bỏ vùng khỏi kết quả; F5 sẽ phát hiện lại các vùng.')
 
     def save_png(self):
         if not self.can_save():
             return
+        if not self.rows or not self.confirmed.get():
+            messagebox.showinfo('Kiểm tra đường bao', 'Hãy xử lý ảnh và xác nhận đường bao trước khi lưu.')
+            return
         path = filedialog.asksaveasfilename(defaultextension='.png', initialfile=Path(self.result.source).stem+'_result.png', filetypes=[('PNG', '*.png')])
         if path:
             try:
-                Image.fromarray(annotate(self.result, self.rows, calibration=self.calibration)).save(path)
+                Image.fromarray(annotate(self.result, self.rows)).save(path)
                 self.status.set('Đã lưu ảnh kết quả: '+path)
             except Exception as error:
                 messagebox.showerror('Không lưu được ảnh', str(error))
 
     def save_bundle(self):
         if not self.can_save():
+            return
+        if not self.rows or not self.confirmed.get():
+            messagebox.showinfo('Kiểm tra đường bao', 'Hãy xử lý ảnh và xác nhận đường bao trước khi lưu.')
             return
         path = filedialog.asksaveasfilename(defaultextension='.zip', initialfile=Path(self.result.source).stem+'_results.zip', filetypes=[('ZIP', '*.zip')])
         if path:
